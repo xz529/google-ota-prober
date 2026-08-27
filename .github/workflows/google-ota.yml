@@ -4,12 +4,6 @@ on:
   schedule:
     - cron: "0 * * * *"
   workflow_dispatch:
-    inputs:
-      upload_full_firmware:
-        description: "Also download and attach the complete OTA package"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: write
@@ -17,6 +11,8 @@ permissions:
 jobs:
   probe-and-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+
     steps:
       - uses: actions/checkout@v4
 
@@ -41,18 +37,15 @@ jobs:
             echo "//"
           done
 
-      - name: Create/update release assets
+      - name: Download full OTA and publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          DOWNLOAD_FIRMWARE_ASSET: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_full_firmware || false }}
         run: bash release.sh
 
-      - name: Upload run metadata
+      - name: Upload metadata for workflow diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ota-prober-results
-          path: |
-            update_info.json
-            dist/*.zip
+          path: update_info.json
           if-no-files-found: ignore
