@@ -3,7 +3,8 @@ set -euo pipefail
 
 INFO_FILE="${INFO_FILE:-update_info.json}"
 DIST_DIR="${DIST_DIR:-dist}"
-DOWNLOAD_FIRMWARE_ASSET="${DOWNLOAD_FIRMWARE_ASSET:-false}"
+# GitHub Release assets have a per-file size limit. Keep a little margin.
+MAX_ASSET_BYTES="${MAX_ASSET_BYTES:-2000000000}"
 
 if [[ ! -f "$INFO_FILE" ]]; then
   echo "$INFO_FILE not found. Nothing to release."
@@ -13,94 +14,96 @@ fi
 mkdir -p "$DIST_DIR"
 
 sanitize() {
-  printf '%s' "$1" | sed -E 's/[^A-Za-z0-9._-]+/_/g; s/^[_\.\-]+//; s/[_\.\-]+$//' | cut -c1-120
+  printf '%s' "$1" | sed -E 's/[^A-Za-z0-9._-]+/_/g; s/^[_\.\-]+//; s/[_\.\-]+$//' | cut -c1-150
 }
 
-make_downloader_bundle() {
-  local config="$1" title="$2" device="$3" url="$4" size="$5" description="$6"
-  local safe_device safe_title bundle_dir bundle_zip
-  safe_device="$(sanitize "$device")"
-  safe_title="$(sanitize "$title")"
-  [[ -n "$safe_device" ]] || safe_device="device"
-  [[ -n "$safe_title" ]] || safe_title="ota"
+human_size() {
+  local bytes="$1"
+  python3 - "$bytes" <<'PY'
+import sys
+n = int(sys.argv[1])
+for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+    if n < 1024 or unit == "TiB":
+        print(f"{n:.2f} {unit}" if unit != "B" else f"{int(n)} B")
+        break
+    n /= 1024
+PY
+}
 
-  bundle_dir="$DIST_DIR/firmware-download-${safe_device}-${safe_title}"
-  bundle_zip="${bundle_dir}.zip"
-  rm -rf "$bundle_dir" "$bundle_zip"
-  mkdir -p "$bundle_dir"
+download_firmware() {
+  local url="$1" output="$2"
+  echo "Downloading full OTA firmware..."
+  echo "URL: $url"
+  echo "Output: $output"
+  rm -f "$output.part"
+  curl \
+    --fail \
+    --location \
+    --retry 8 \
+    --retry-delay 3 \
+    --retry-all-errors \
+    --connect-timeout 30 \
+    --speed-time 120 \
+    --speed-limit 1024 \
+    --continue-at - \
+    --output "$output.part" \
+    "$url"
+  mv "$output.part" "$output"
+}
 
-  printf '%s\n' "$url" > "$bundle_dir/firmware-url.txt"
-  jq --arg config "$config" '.[$config]' "$INFO_FILE" > "$bundle_dir/update-info.json"
+upload_full_firmware() {
+  local tag="$1" firmware_path="$2"
+  local size sha sums base
+  size="$(stat -c '%s' "$firmware_path")"
+  sha="$(sha256sum "$firmware_path" | awk '{print $1}')"
+  base="$(basename "$firmware_path")"
 
-  cat > "$bundle_dir/download.sh" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-URL='$url'
-OUT="\${1:-firmware.zip}"
-echo "Downloading firmware to \$OUT"
-if command -v curl >/dev/null 2>&1; then
-  curl -fL --retry 5 --retry-delay 2 -C - -o "\$OUT" "\$URL"
-elif command -v wget >/dev/null 2>&1; then
-  wget -c -O "\$OUT" "\$URL"
-else
-  echo "curl or wget is required" >&2
-  exit 1
-fi
-EOF
-  chmod +x "$bundle_dir/download.sh"
+  echo "Firmware size: $(human_size "$size")"
+  echo "SHA-256: $sha"
 
-  cat > "$bundle_dir/download.ps1" <<EOF
-\$ErrorActionPreference = 'Stop'
-\$Url = '$url'
-\$OutFile = if (\$args.Count -gt 0) { \$args[0] } else { 'firmware.zip' }
-Write-Host "Downloading firmware to \$OutFile"
-Invoke-WebRequest -Uri \$Url -OutFile \$OutFile -UseBasicParsing
-EOF
+  sums="$DIST_DIR/SHA256SUMS-${tag//\//_}.txt"
+  printf '%s  %s\n' "$sha" "$base" > "$sums"
 
-  cat > "$bundle_dir/download.bat" <<EOF
-@echo off
-set "URL=$url"
-set "OUT=%~1"
-if "%OUT%"=="" set "OUT=firmware.zip"
-echo Downloading firmware to %OUT%
-curl.exe -fL --retry 5 -C - -o "%OUT%" "%URL%"
-if errorlevel 1 exit /b 1
-EOF
+  if (( size <= MAX_ASSET_BYTES )); then
+    echo "Uploading complete firmware as one GitHub Release asset..."
+    gh release upload "$tag" "$firmware_path" --clobber
+    gh release upload "$tag" "$sums" --clobber
+    echo "Uploaded full firmware: $base"
+    return 0
+  fi
 
-  cat > "$bundle_dir/README.txt" <<EOF
-Firmware download package
-=========================
-Device: $device
-Update: $title
-Reported size: $size
+  echo "Firmware is larger than the single-asset GitHub limit."
+  echo "Splitting the REAL firmware bytes into release parts..."
 
-This archive does not contain the firmware image itself.
-It contains the official OTA URL and downloader scripts.
+  local part_prefix="$DIST_DIR/${base}.part-"
+  rm -f "${part_prefix}"*
+  split --bytes=1900M --numeric-suffixes=1 --suffix-length=3 "$firmware_path" "$part_prefix"
 
-Linux/macOS:
-  ./download.sh
+  local parts=("${part_prefix}"*)
+  if (( ${#parts[@]} == 0 )); then
+    echo "Failed to split firmware." >&2
+    return 1
+  fi
 
-Windows PowerShell:
-  powershell -ExecutionPolicy Bypass -File .\\download.ps1
+  : > "$sums"
+  for part in "${parts[@]}"; do
+    sha256sum "$part" >> "$sums"
+  done
 
-Windows CMD (Windows 10/11 with curl):
-  download.bat
+  echo "Uploading ${#parts[@]} firmware parts..."
+  for part in "${parts[@]}"; do
+    gh release upload "$tag" "$part" --clobber
+  done
+  gh release upload "$tag" "$sums" --clobber
 
-Direct URL:
-$url
-
-Description:
-$description
-EOF
-
-  (cd "$DIST_DIR" && zip -qr "$(basename "$bundle_zip")" "$(basename "$bundle_dir")")
-  rm -rf "$bundle_dir"
-  printf '%s\n' "$bundle_zip"
+  rm -f "$firmware_path"
+  echo "Uploaded complete firmware as ${#parts[@]} data parts."
 }
 
 configs="$(jq -r 'keys[]' "$INFO_FILE")"
 while IFS= read -r config; do
   [[ -n "$config" ]] || continue
+
   new_update="$(jq -r --arg config "$config" '.[$config].found // false' "$INFO_FILE")"
   if [[ "$new_update" != "true" ]]; then
     echo "No new update for config $config"
@@ -118,43 +121,41 @@ while IFS= read -r config; do
     continue
   fi
 
-  asset="$(make_downloader_bundle "$config" "$update_title" "$update_device" "$update_url" "$update_size" "$update_description")"
+  safe_device="$(sanitize "$update_device")"
+  safe_title="$(sanitize "$update_title")"
+  [[ -n "$safe_device" ]] || safe_device="device"
+  [[ -n "$safe_title" ]] || safe_title="ota"
 
-  release_notes=$(cat <<EOF
+  firmware_name="${safe_device}-${safe_title}-FULL-OTA.zip"
+  firmware_path="$DIST_DIR/$firmware_name"
+
+  release_notes=$(cat <<EOF2
 # $update_device
 
 ## Changelog
 $update_description
 
-**Size:** $update_size
+**Reported size:** $update_size
 
-**Official OTA URL:** $update_url
+**Official OTA source:** $update_url
 
-### Firmware download archive
-Download the attached **$(basename "$asset")** and run the script for your OS. The archive contains the official OTA URL plus Linux/macOS and Windows download scripts.
-EOF
+## Full firmware
+The assets below contain the **actual OTA firmware downloaded from Google's OTA server**.
+
+If the firmware fits GitHub's per-file asset limit, download **$firmware_name** directly.
+If it is larger, GitHub cannot store it as one asset, so the exact firmware bytes are uploaded as numbered **.part-001, .part-002, ...** files. Concatenate the parts in numeric order to reconstruct the original ZIP.
+EOF2
 )
 
   if gh release view "$update_title" >/dev/null 2>&1; then
-    echo "Release '$update_title' already exists. Ensuring downloader archive is attached."
-    gh release upload "$update_title" "$asset" --clobber
+    echo "Release '$update_title' already exists. Updating notes."
+    gh release edit "$update_title" --notes "$release_notes"
   else
-    gh release create "$update_title" "$asset" --title "$update_title" --notes "$release_notes"
+    gh release create "$update_title" --title "$update_title" --notes "$release_notes"
     echo "Created release: $update_title"
   fi
 
-  if [[ "$DOWNLOAD_FIRMWARE_ASSET" == "true" ]]; then
-    firmware_name="$(sanitize "$update_device")-$(sanitize "$update_title").zip"
-    firmware_path="$DIST_DIR/$firmware_name"
-    echo "Downloading full OTA for release asset..."
-    if curl -fL --retry 5 --retry-delay 2 -C - -o "$firmware_path" "$update_url"; then
-      if gh release upload "$update_title" "$firmware_path" --clobber; then
-        echo "Uploaded full OTA asset: $firmware_name"
-      else
-        echo "Warning: GitHub rejected the full OTA asset (often because it is too large). Downloader archive is still available." >&2
-      fi
-    else
-      echo "Warning: failed to download full OTA. Downloader archive is still available." >&2
-    fi
-  fi
+  download_firmware "$update_url" "$firmware_path"
+  upload_full_firmware "$update_title" "$firmware_path"
+
 done <<< "$configs"

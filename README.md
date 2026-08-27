@@ -1,42 +1,29 @@
-# Google OTA prober
+# Google OTA Prober
 
-This program obtains OTA update URLs from Google's Android check-in service for a configured device and can optionally download the OTA package.
+Утилита опрашивает Google OTA API для устройств из `config/`, определяет доступное обновление и создаёт GitHub Release.
 
-## Requirements
+## Что теперь публикуется в Release
 
-- Python 3
-- Stock ROM build fingerprint data
+При найденном обновлении workflow **обязательно скачивает полную OTA-прошивку с официального Google OTA URL** и загружает сами данные прошивки в GitHub Release.
 
-## Local usage
+- Если OTA помещается в лимит одного Release asset, в `Resources / Assets` появляется один файл вида `DEVICE-VERSION-FULL-OTA.zip` — это полноценная прошивка.
+- Если OTA превышает лимит одного файла GitHub, исходный ZIP автоматически делится на `...FULL-OTA.zip.part-001`, `part-002`, ... . Это части самой прошивки, а не downloader-файлы. После объединения получается исходный OTA ZIP байт-в-байт.
+- Рядом публикуется `SHA256SUMS-*.txt` для проверки целостности.
 
-1. Install dependencies: `python -m pip install -r requirements.txt`
-2. Edit `config/config.yml`.
-3. Run: `python probe.py -c config/config.yml`
-4. To download the detected OTA locally: `python probe.py -c config/config.yml --download`
+Архивы со ссылками и `download.sh`/`download.ps1` больше не создаются.
 
-Telegram is optional. Set `BOT_TOKEN` and `CHAT_ID` only if you want notifications.
+## Ручной запуск
 
-## GitHub Releases
+```bash
+python -m pip install -r requirements.txt
+python probe.py -c config/config.yml
+bash release.sh
+```
 
-The included GitHub Actions workflow checks OTA updates every hour. For every detected update it creates a GitHub Release and attaches a file named similar to:
+Для публикации через `release.sh` должен быть установлен GitHub CLI (`gh`) и задан `GH_TOKEN` с правом записи Releases.
 
-`firmware-download-DEVICE-UPDATE.zip`
+Для локального скачивания OTA без GitHub Release также доступно:
 
-That small archive contains:
-
-- `firmware-url.txt` — direct official OTA URL;
-- `update-info.json` — update metadata;
-- `download.sh` — Linux/macOS downloader with resume support;
-- `download.ps1` — Windows PowerShell downloader;
-- `download.bat` — Windows CMD downloader using curl;
-- `README.txt` — usage information.
-
-This makes the firmware downloadable from every release without storing a multi-gigabyte OTA in the repository.
-
-For a manually started workflow, enable **Also download and attach the complete OTA package** to additionally try uploading the complete firmware ZIP to the GitHub Release. If GitHub rejects a very large OTA asset, the downloader archive remains attached and usable.
-
-## Limitations
-
-- Works only for devices whose OTA updates are served through Google's check-in/OTA infrastructure.
-- Usually returns the newest OTA applicable to the configured source build.
-- Incremental updates may be returned instead of full packages.
+```bash
+python probe.py -c config/config.yml --download
+```
