@@ -1,30 +1,58 @@
-name: GH Actions Cron Schedule
+name: Google OTA Prober
+
 on:
   schedule:
-    - cron:  '0 * * * *'
+    - cron: "0 * * * *"
   workflow_dispatch:
+    inputs:
+      upload_full_firmware:
+        description: "Also download and attach the complete OTA package"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  probe-and-release:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Prepare the environment
-      run: |
-        pip install -r requirements.txt
+      - uses: actions/checkout@v4
 
-    - name: Check ota
-      shell: bash
-      env:
-        bot_token: ${{ secrets.BOT_TOKEN }}
-        chat_id: ${{ secrets.CHAT_ID }}
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        for file in config/config.yml; do python probe.py -c $file && echo "//"; done
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          cache: pip
 
-    - name: Check for updates and create release
-      if: success()
-      run: |
-        bash release.sh
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Probe OTA
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          set -e
+          for file in config/*.yml config/*.yaml; do
+            [ -f "$file" ] || continue
+            python probe.py -c "$file"
+            echo "//"
+          done
+
+      - name: Create/update release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOWNLOAD_FIRMWARE_ASSET: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_full_firmware || false }}
+        run: bash release.sh
+
+      - name: Upload run metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ota-prober-results
+          path: |
+            update_info.json
+            dist/*.zip
+          if-no-files-found: ignore
