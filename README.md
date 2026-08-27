@@ -1,25 +1,42 @@
 # Google OTA prober
 
-This program is designed to obtain URLs to over-the-air (OTA) update packages from Google's servers for a specified device.
+This program obtains OTA update URLs from Google's Android check-in service for a configured device and can optionally download the OTA package.
 
 ## Requirements
-* Python 3
-* Build fingerprint of your stock ROM
 
-## How to use
-1. Install needed dependencies: `python -m pip install -r requirements.txt`
-2. Modify `config.yml` correctly, as described in the file itself.
-3. `python probe.py`
+- Python 3
+- Stock ROM build fingerprint data
 
-If you wish to download the OTA file, pass `--download` as an argument on your terminal.
+## Local usage
+
+1. Install dependencies: `python -m pip install -r requirements.txt`
+2. Edit `config/config.yml`.
+3. Run: `python probe.py -c config/config.yml`
+4. To download the detected OTA locally: `python probe.py -c config/config.yml --download`
+
+Telegram is optional. Set `BOT_TOKEN` and `CHAT_ID` only if you want notifications.
+
+## GitHub Releases
+
+The included GitHub Actions workflow checks OTA updates every hour. For every detected update it creates a GitHub Release and attaches a file named similar to:
+
+`firmware-download-DEVICE-UPDATE.zip`
+
+That small archive contains:
+
+- `firmware-url.txt` — direct official OTA URL;
+- `update-info.json` — update metadata;
+- `download.sh` — Linux/macOS downloader with resume support;
+- `download.ps1` — Windows PowerShell downloader;
+- `download.bat` — Windows CMD downloader using curl;
+- `README.txt` — usage information.
+
+This makes the firmware downloadable from every release without storing a multi-gigabyte OTA in the repository.
+
+For a manually started workflow, enable **Also download and attach the complete OTA package** to additionally try uploading the complete firmware ZIP to the GitHub Release. If GitHub rejects a very large OTA asset, the downloader archive remains attached and usable.
 
 ## Limitations
-* This only works for devices that use Google's OTA update servers.
-* The prober can only get the latest OTA update package that works on the build specified in `config.yml`.
-* Unless it is a major Android upgrade (11 -> 12), the prober will only get links for incremental OTA packages.
 
-## References
-1. https://github.com/MCMrARM/Google-Play-API/blob/master/proto/gsf.proto
-2. https://github.com/microg/GmsCore/blob/master/play-services-core-proto/src/main/proto/checkin.proto
-3. https://chromium.googlesource.com/chromium/chromium/+/trunk/google_apis/gcm/protocol/android_checkin.proto
-4. https://github.com/p1gp1g/fp3_get_ota_url
+- Works only for devices whose OTA updates are served through Google's check-in/OTA infrastructure.
+- Usually returns the newest OTA applicable to the configured source build.
+- Incremental updates may be returned instead of full packages.

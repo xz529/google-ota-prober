@@ -2,4 +2,7 @@ debug.txt
 test_data.txt
 *.gz
 *.zip
-__pycache__
+__pycache__/
+update_info.json
+downloads/
+dist/
